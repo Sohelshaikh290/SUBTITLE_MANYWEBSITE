@@ -15,12 +15,105 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Custom Styles ---
+# --- Custom Styles (HTML/CSS/JS) ---
 st.markdown("""
     <style>
-    .main { max-width: 1000px; margin: 0 auto; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; }
-    .video-info-container { display: flex; gap: 20px; margin-bottom: 20px; align-items: flex-start; }
+    /* Import Google Font */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+    /* Global Styles */
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
+    }
+
+    /* Modern Dark Background */
+    .stApp {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        color: #e2e8f0;
+    }
+
+    /* Title Styling */
+    h1 {
+        background: linear-gradient(to right, #4facfe 0%, #00f2fe 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 800 !important;
+        letter-spacing: -1px;
+    }
+    
+    h3 {
+        color: #94a3b8 !important;
+    }
+
+    /* Input Fields */
+    .stTextInput > div > div > input {
+        background-color: #1e293b;
+        color: white;
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 12px;
+        transition: border-color 0.3s ease;
+    }
+    
+    .stTextInput > div > div > input:focus {
+        border-color: #38bdf8;
+        box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+    }
+
+    /* Styled Buttons */
+    .stButton > button {
+        background: linear-gradient(90deg, #3b82f6 0%, #2563eb 100%);
+        color: white;
+        border: none;
+        padding: 0.6rem 1.2rem;
+        border-radius: 10px;
+        font-weight: 600;
+        width: 100%;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 15px -3px rgba(37, 99, 235, 0.4);
+        background: linear-gradient(90deg, #2563eb 0%, #1d4ed8 100%);
+    }
+
+    /* Card/Expander Styling */
+    div[data-testid="stExpander"] {
+        background-color: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+
+    /* Selectbox styling */
+    div[data-baseweb="select"] > div {
+        background-color: #1e293b;
+        border-color: #334155;
+        border-radius: 10px;
+        color: white;
+    }
+
+    /* Images */
+    img {
+        border-radius: 16px;
+        box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+        border: 1px solid #334155;
+    }
+    
+    /* Custom divider */
+    hr {
+        margin: 2em 0;
+        border-color: #334155;
+    }
+    
+    /* Footer */
+    .footer-text {
+        text-align: center;
+        color: #64748b;
+        font-size: 0.875rem;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -99,8 +192,11 @@ def process_youtube_subtitles(url: str, sub_code: str, is_auto: bool, cookies_pa
             return None, ""
 
 def render_youtube_ui(info, url, cookies_path):
-    st.subheader("Settings")
-    clean_mode = st.toggle("Clean Transcript Mode", value=True, help="Removes timestamps for easy reading.")
+    st.subheader("⚙️ Download Options")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        clean_mode = st.toggle("Clean Transcript Mode", value=True, help="Removes timestamps for easy reading.")
     
     manual = info.get('subtitles', {})
     auto = info.get('automatic_captions', {})
@@ -120,7 +216,7 @@ def render_youtube_ui(info, url, cookies_path):
             format_func=lambda x: x['label']
         )
         
-        if st.button("Generate Download"):
+        if st.button("🚀 Generate Download Link"):
             with st.spinner("Processing..."):
                 data, name = process_youtube_subtitles(
                     url, 
@@ -131,7 +227,7 @@ def render_youtube_ui(info, url, cookies_path):
                 )
                 
                 if data:
-                    st.balloons()
+                    st.success("Ready!")
                     st.download_button(
                         label=f"💾 Download {name}",
                         data=data,
@@ -169,7 +265,7 @@ def render_dailymotion_ui(info):
     add_options(manual_subs, "✅ Manual")
     add_options(auto_subs, "🤖 Auto")
 
-    st.subheader("Download Settings")
+    st.subheader("⚙️ Download Options")
     
     if options:
         selection = st.selectbox(
@@ -178,13 +274,13 @@ def render_dailymotion_ui(info):
             format_func=lambda x: x['label']
         )
 
-        if st.button("Generate Download"):
+        if st.button("🚀 Generate Download Link"):
             with st.spinner("Fetching raw subtitle file..."):
                 try:
                     response = requests.get(selection['url'])
                     if response.status_code == 200:
                         file_name = f"{safe_title}_{selection['lang']}.{selection['ext']}"
-                        st.balloons()
+                        st.success("Ready!")
                         st.download_button(
                             label=f"💾 Download {selection['ext'].upper()}",
                             data=response.content,
@@ -207,7 +303,11 @@ with col1:
 with col2:
     st.title("Universal Subtitle Downloader")
 
-st.caption("Supports **YouTube** (Clean & SRT conversion) and **Dailymotion** (Raw VTT/SRT extraction).")
+st.markdown("""
+<div style='background-color: rgba(30, 41, 59, 0.5); padding: 15px; border-radius: 10px; border: 1px solid #334155; margin-bottom: 20px;'>
+    <p style='margin:0; color: #94a3b8;'>Supports <b>YouTube</b> (Clean & SRT conversion) and <b>Dailymotion</b> (Raw VTT/SRT extraction).</p>
+</div>
+""", unsafe_allow_html=True)
 
 # Global Settings (Cookies apply to both if needed, mainly YouTube)
 with st.expander("🔐 Advanced Settings (Cookies)"):
@@ -237,15 +337,22 @@ if url:
         extractor = info.get('extractor_key', 'Unknown').lower()
 
         st.divider()
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            if thumbnail:
-                st.image(thumbnail, use_container_width=True)
-        with col2:
-            st.subheader(title)
-            st.write(f"**Source:** {extractor.capitalize()}")
-            st.write(f"**Duration:** {duration_str}")
-            st.write(f"**Channel:** {info.get('uploader', 'Unknown')}")
+        
+        # Use a container for the video info card effect
+        with st.container():
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                if thumbnail:
+                    st.image(thumbnail, use_container_width=True)
+            with col2:
+                st.subheader(title)
+                st.markdown(f"""
+                <div style='display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px;'>
+                    <span style='background-color: #3b82f6; padding: 4px 12px; border-radius: 20px; font-size: 0.8em; font-weight: 600;'>{extractor.capitalize()}</span>
+                    <span style='background-color: #1e293b; border: 1px solid #334155; padding: 4px 12px; border-radius: 20px; font-size: 0.8em;'>⏱️ {duration_str}</span>
+                    <span style='background-color: #1e293b; border: 1px solid #334155; padding: 4px 12px; border-radius: 20px; font-size: 0.8em;'>👤 {info.get('uploader', 'Unknown')}</span>
+                </div>
+                """, unsafe_allow_html=True)
 
         st.divider()
 
@@ -261,4 +368,4 @@ if url:
         os.remove(cookies_path)
 
 st.markdown("---")
-st.markdown("Developed with ❤️ using Streamlit & yt-dlp")
+st.markdown("<p class='footer-text'>Developed with ❤️ using Streamlit & yt-dlp</p>", unsafe_allow_html=True)
