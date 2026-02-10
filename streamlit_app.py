@@ -200,7 +200,13 @@ def render_dailymotion_ui(info):
 
 # --- Main App Layout ---
 
-st.title("🎬 Universal Subtitle Downloader")
+# Header with Logo
+col1, col2 = st.columns([0.1, 0.9])
+with col1:
+    st.image("https://cdn-icons-png.flaticon.com/512/1169/1169608.png", width=70)
+with col2:
+    st.title("Universal Subtitle Downloader")
+
 st.caption("Supports **YouTube** (Clean & SRT conversion) and **Dailymotion** (Raw VTT/SRT extraction).")
 
 # Global Settings (Cookies apply to both if needed, mainly YouTube)
