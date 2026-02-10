@@ -148,54 +148,55 @@ def render_dailymotion_ui(info):
     manual_subs = info.get('subtitles', {})
     auto_subs = info.get('automatic_captions', {})
     
-    all_subs = {}
-    
-    for lang, sub_list in manual_subs.items():
-        all_subs[lang] = {'type': 'Manual', 'formats': sub_list}
-    
-    for lang, sub_list in auto_subs.items():
-        if lang not in all_subs:
-            all_subs[lang] = {'type': 'Auto-Generated', 'formats': sub_list}
-        else:
-            all_subs[lang]['formats'].extend(sub_list)
+    options = []
 
-    st.subheader("⬇️ Download Raw Files")
+    # Helper to add options
+    def add_options(subs_dict, type_label):
+        for lang, sub_list in subs_dict.items():
+            for sub in sub_list:
+                ext = sub.get('ext')
+                # Skip playlists, we want text formats
+                if ext == 'm3u8': 
+                    continue
+                
+                options.append({
+                    "label": f"{type_label} {lang.upper()} ({ext})",
+                    "url": sub.get('url'),
+                    "ext": ext,
+                    "lang": lang
+                })
+
+    add_options(manual_subs, "✅ Manual")
+    add_options(auto_subs, "🤖 Auto")
+
+    st.subheader("Download Settings")
     
-    if all_subs:
-        for lang, data in all_subs.items():
-            sub_type = data['type']
-            formats = data['formats']
-            
-            with st.expander(f"{lang.upper()} ({sub_type})"):
-                for fmt in formats:
-                    ext = fmt.get('ext')
-                    download_url = fmt.get('url')
-                    
-                    if ext == 'm3u8':
-                        continue
-                    
-                    file_name = f"{safe_title}_{lang}.{ext}"
-                    
-                    try:
-                        # Fetch immediately for button creation
-                        # Note: For very large lists, this might slow down rendering. 
-                        # Ideally we'd use a callback, but st.download_button needs data.
-                        # Since text files are small, we fetch on render or use a lambda if possible.
-                        # Streamlit doesn't support lambda for data. We will fetch on click via a trick 
-                        # or just fetch now (Dailymotion responses are fast).
-                        response = requests.get(download_url)
-                        if response.status_code == 200:
-                            st.download_button(
-                                label=f"Download .{ext.upper()} File",
-                                data=response.content,
-                                file_name=file_name,
-                                mime="application/octet-stream",
-                                key=f"{lang}_{ext}_{download_url}"
-                            )
-                    except:
-                        pass
+    if options:
+        selection = st.selectbox(
+            "Choose Language & Format",
+            options,
+            format_func=lambda x: x['label']
+        )
+
+        if st.button("Generate Download"):
+            with st.spinner("Fetching raw subtitle file..."):
+                try:
+                    response = requests.get(selection['url'])
+                    if response.status_code == 200:
+                        file_name = f"{safe_title}_{selection['lang']}.{selection['ext']}"
+                        st.balloons()
+                        st.download_button(
+                            label=f"💾 Download {selection['ext'].upper()}",
+                            data=response.content,
+                            file_name=file_name,
+                            mime="application/octet-stream"
+                        )
+                    else:
+                        st.error("Could not fetch file from Dailymotion.")
+                except Exception as e:
+                    st.error(f"Error fetching subtitle: {e}")
     else:
-        st.info("No subtitles found.")
+        st.info("No text-based subtitles found for this video.")
 
 # --- Main App Layout ---
 
