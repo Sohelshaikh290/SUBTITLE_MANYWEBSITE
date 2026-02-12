@@ -177,19 +177,30 @@ def strip_timestamps(text: str) -> str:
     return text.strip()
 
 def get_info(url: str, cookies_path: Optional[str] = None):
-    """Extracts video information using yt-dlp."""
+    """Extracts video information using yt-dlp with anti-bot headers."""
     ydl_opts = {
         'skip_download': True,
         'quiet': True,
         'no_warnings': True,
         'listsubtitles': True,
-        'cookiefile': cookies_path if cookies_path else None
+        'cookiefile': cookies_path if cookies_path else None,
+        # Common headers to avoid 401/403 errors on Dailymotion/YouTube
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Mode': 'navigate',
+        }
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
     except Exception as e:
-        st.error(f"Extraction Error: {str(e)}")
+        error_msg = str(e)
+        if "401" in error_msg:
+            st.error("Dailymotion Unauthorized (401). This often happens when the platform blocks automated requests. Try using the 'Cookies' setting with a cookies.txt file from your browser.")
+        else:
+            st.error(f"Extraction Error: {error_msg}")
         return None
 
 # --- Unified Processing Logic (Works for YouTube, Dailymotion, etc.) ---
@@ -208,6 +219,9 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
             'cookiefile': cookies_path if cookies_path else None,
             'quiet': True,
             'no_warnings': True,
+            'headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            }
         }
 
         try:
