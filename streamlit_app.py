@@ -162,21 +162,17 @@ def get_info(url: str, cookies_path: Optional[str] = None):
 def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str, format_choice: str) -> Tuple[Optional[bytes], str]:
     """Handles download and conversion for both YouTube and general sources via yt-dlp."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Map choice to yt-dlp preference
-        # If user wants SRT, we use postprocessor. If VTT, we keep it. If Clean TXT, we download whatever and strip it.
-        ext_needed = 'srt' if format_choice == "SRT" else 'vtt'
-        
         ydl_opts = {
             'skip_download': True,
             'writesubtitles': not is_auto,
             'writeautomaticsub': is_auto,
             'subtitleslangs': [sub_code],
-            'outtmpl': os.path.join(tmpdir, 'sub_file'),
+            'outtmpl': os.path.join(tmpdir, 'sub_file.%(ext)s'),
             'cookiefile': cookies_path if cookies_path else None,
         }
 
-        # Add conversion if SRT is requested
-        if format_choice == "SRT":
+        # Force conversion to srt if SRT or Clean TXT is requested (SRT is easier to parse for cleaning)
+        if format_choice in ["SRT", "Clean TXT"]:
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegSubtitlesConvertor',
                 'format': 'srt'
@@ -191,12 +187,23 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
                 if not files:
                     return None, ""
                 
-                # Filter for the actual subtitle file among temp files
+                # Logic to find the right file: 
+                # If we asked for SRT, look for .srt first. Otherwise look for .vtt.
                 sub_file = None
+                target_ext = '.srt' if format_choice in ["SRT", "Clean TXT"] else '.vtt'
+                
+                # Try to find the specific converted file first
                 for f in files:
-                    if f.endswith(('.srt', '.vtt', '.ttml', '.json3')):
+                    if f.endswith(target_ext):
                         sub_file = f
                         break
+                
+                # Fallback to any subtitle file if target extension wasn't found
+                if not sub_file:
+                    for f in files:
+                        if f.endswith(('.srt', '.vtt', '.ttml', '.json3')):
+                            sub_file = f
+                            break
                 
                 if not sub_file:
                     return None, ""
