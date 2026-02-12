@@ -162,9 +162,8 @@ def get_info(url: str, cookies_path: Optional[str] = None):
 def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str, format_choice: str) -> Tuple[Optional[bytes], str]:
     """Handles download and conversion for both YouTube and general sources via yt-dlp."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Base options
-        # We use a generic output name so yt-dlp can manage the extension
-        outtmpl = os.path.join(tmpdir, 'subtitle')
+        # We use a placeholder extension so yt-dlp can determine the best format during download
+        outtmpl = os.path.join(tmpdir, 'subtitle.%(ext)s')
         
         ydl_opts = {
             'skip_download': True,
@@ -173,14 +172,17 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
             'subtitleslangs': [sub_code],
             'outtmpl': outtmpl,
             'cookiefile': cookies_path if cookies_path else None,
+            'quiet': True,
+            'no_warnings': True,
         }
 
-        # Conversion logic:
-        # If user wants SRT or Clean TXT, we MUST use FFmpeg to convert the raw source to srt first.
+        # CONVERSION LOGIC
+        # If user wants SRT or Clean TXT, we instruct yt-dlp to use FFmpeg to convert the downloaded format to srt.
         if format_choice in ["SRT", "Clean TXT"]:
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegSubtitlesConvertor',
-                'format': 'srt'
+                'format': 'srt',
+                'when': 'before_dl' # Try to force conversion logic immediately after sub download
             }]
 
         try:
@@ -188,26 +190,28 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
                 info = ydl.extract_info(url, download=True)
                 video_title = info.get('title', 'subtitles')
                 
-                # After download/conversion, look for files in the tmp directory
+                # Check temp directory for the result
                 files = os.listdir(tmpdir)
                 if not files:
                     return None, ""
                 
                 target_file = None
                 
-                # Priority 1: Specifically look for the extension we requested
+                # Step 1: Look for the specifically converted .srt file first if that was requested
                 if format_choice in ["SRT", "Clean TXT"]:
                     for f in files:
                         if f.endswith('.srt'):
                             target_file = f
                             break
-                elif format_choice == "Raw (VTT)":
+                
+                # Step 2: If we want Raw (VTT) or Step 1 failed, look for .vtt
+                if not target_file and format_choice == "Raw (VTT)":
                     for f in files:
                         if f.endswith('.vtt'):
                             target_file = f
                             break
                 
-                # Priority 2: Fallback to any subtitle format if requested one wasn't found
+                # Step 3: Global fallback (pick the first subtitle-related file)
                 if not target_file:
                     subtitle_exts = ('.srt', '.vtt', '.ttml', '.json3', '.ass', '.ssa')
                     for f in files:
@@ -220,19 +224,27 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
 
                 source_path = os.path.join(tmpdir, target_file)
                 
+                # Read the actual content of the file
                 with open(source_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
                 
+                # Determine final output
                 if format_choice == "Clean TXT":
+                    # Strip timestamps regardless of whether it's VTT or SRT
                     content = strip_timestamps(content)
                     final_name = f"{sanitize_filename(video_title)}.txt"
                     return content.encode('utf-8'), final_name
+                
                 elif format_choice == "SRT":
-                    # Force .srt extension in the final filename
+                    # If target_file is not .srt (meaning conversion failed), we warn the user
+                    if not target_file.endswith('.srt'):
+                        st.warning("FFmpeg conversion failed. Providing original format with .srt extension as fallback.")
+                    
                     final_name = f"{sanitize_filename(video_title)}.srt"
                     return content.encode('utf-8'), final_name
+                
                 else:
-                    # Keep original extension for Raw/fallback
+                    # Raw (VTT)
                     actual_ext = os.path.splitext(target_file)[1]
                     final_name = f"{sanitize_filename(video_title)}{actual_ext}"
                     return content.encode('utf-8'), final_name
@@ -273,11 +285,11 @@ def render_download_options(info, url, cookies_path):
             "2. Select Output Format",
             ["SRT", "Raw (VTT)", "Clean TXT"],
             horizontal=True,
-            help="SRT: Standard format. Raw: Original VTT source. Clean TXT: Text transcript."
+            help="SRT: Full standard format. Raw: Original source (usually VTT). Clean TXT: Pure text."
         )
         
     if st.button("🚀 Generate Download Link"):
-        with st.spinner("Preparing file..."):
+        with st.spinner("Processing subtitles and converting format..."):
             data, name = process_subtitles(
                 url, 
                 selection['code'], 
@@ -287,7 +299,7 @@ def render_download_options(info, url, cookies_path):
             )
             
             if data:
-                st.success(f"Success! {format_choice} file ready.")
+                st.success(f"Success! {format_choice} generated.")
                 mime_map = {"SRT": "text/srt", "Raw (VTT)": "text/vtt", "Clean TXT": "text/plain"}
                 st.download_button(
                     label=f"💾 Download {name}",
