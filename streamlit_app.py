@@ -4,6 +4,7 @@ import os
 import tempfile
 import re
 import requests
+import time
 from datetime import timedelta
 from typing import Tuple, Optional
 
@@ -133,7 +134,6 @@ def vtt_to_srt(vtt_text: str) -> str:
     text = re.sub(r'^WEBVTT.*?(\n\n|\r\n\r\n)', '', vtt_text, flags=re.DOTALL)
     
     # 2. Convert timestamps: 00:00.000 -> 00:00:00,000
-    # Handle both MM:SS.mmm and HH:MM:SS.mmm
     def fix_timestamp(match):
         ts = match.group(0).replace('.', ',')
         if len(ts.split(':')[0]) == 2 and ts.count(':') == 1:
@@ -150,7 +150,6 @@ def vtt_to_srt(vtt_text: str) -> str:
     
     for line in lines:
         if ' --> ' in line:
-            # New segment start
             if current_block:
                 srt_blocks.append(f"{block_id}\n" + "\n".join(current_block).strip() + "\n")
                 block_id += 1
@@ -159,7 +158,6 @@ def vtt_to_srt(vtt_text: str) -> str:
         elif line.strip():
             current_block.append(line)
             
-    # Add last block
     if current_block:
         srt_blocks.append(f"{block_id}\n" + "\n".join(current_block).strip() + "\n")
         
@@ -167,15 +165,10 @@ def vtt_to_srt(vtt_text: str) -> str:
 
 def strip_timestamps(text: str) -> str:
     """Removes VTT/SRT timestamps and metadata for a clean transcript."""
-    # Remove WEBVTT header
     text = re.sub(r'WEBVTT\n.*?\n\n', '', text, flags=re.DOTALL)
-    # Remove timestamps (VTT: 00:00:00.000 --> 00:00:00.000, SRT: 00:00:00,000 --> 00:00:00,000)
     text = re.sub(r'\d{1,2}:\d{2}:\d{2}[\.,]\d{3} --> \d{1,2}:\d{2}:\d{2}[\.,]\d{3}.*?\n', '', text)
-    # Remove HTML-like tags
     text = re.sub(r'<[^>]*>', '', text)
-    # Remove leading sequence numbers from SRT
     text = re.sub(r'^\d+\s*$', '', text, flags=re.MULTILINE)
-    # Collapse multiple newlines
     text = re.sub(r'\n+', '\n', text)
     return text.strip()
 
@@ -195,12 +188,11 @@ def get_info(url: str, cookies_path: Optional[str] = None):
         st.error(f"Extraction Error: {str(e)}")
         return None
 
-# --- Unified Processing Logic ---
+# --- Unified Processing Logic (General/YouTube) ---
 
 def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str, format_choice: str) -> Tuple[Optional[bytes], str]:
     """Handles download and native conversion for both YouTube and general sources."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # We download the raw format (usually vtt) and convert it in Python
         outtmpl = os.path.join(tmpdir, 'subtitle.%(ext)s')
         
         ydl_opts = {
@@ -223,7 +215,6 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
                 if not files:
                     return None, ""
                 
-                # Find the downloaded subtitle file (vtt, ttml, etc)
                 source_file = None
                 subtitle_exts = ('.vtt', '.srt', '.ttml', '.json3', '.ass', '.ssa')
                 for f in files:
@@ -239,14 +230,11 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
                 with open(source_path, 'r', encoding='utf-8', errors='ignore') as f:
                     raw_content = f.read()
                 
-                # Handle Output Selection
                 if format_choice == "SRT":
-                    # Native VTT to SRT conversion (replaces FFmpeg dependency)
                     if source_file.endswith('.vtt'):
                         content = vtt_to_srt(raw_content)
                     else:
-                        content = raw_content # Already srt or other
-                    
+                        content = raw_content
                     final_name = f"{sanitize_filename(video_title)}.srt"
                     return content.encode('utf-8'), final_name
 
@@ -256,7 +244,6 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
                     return content.encode('utf-8'), final_name
                 
                 else:
-                    # Raw (VTT)
                     actual_ext = os.path.splitext(source_file)[1]
                     final_name = f"{sanitize_filename(video_title)}{actual_ext}"
                     return raw_content.encode('utf-8'), final_name
@@ -322,13 +309,72 @@ def render_download_options(info, url, cookies_path):
             else:
                 st.error("Extraction failed. This video might not support the selected format.")
 
+# --- Dailymotion Specific Logic ---
+
+def render_dailymotion_ui(info):
+    video_title = info.get('title', 'Dailymotion_Video')
+    safe_title = sanitize_filename(video_title)
+    
+    manual_subs = info.get('subtitles', {})
+    auto_subs = info.get('automatic_captions', {})
+    
+    options = []
+
+    # Helper to add options
+    def add_options(subs_dict, type_label):
+        for lang, sub_list in subs_dict.items():
+            for sub in sub_list:
+                ext = sub.get('ext')
+                # Skip playlists, we want text formats
+                if ext == 'm3u8': 
+                    continue
+                
+                options.append({
+                    "label": f"{type_label} {lang.upper()} ({ext})",
+                    "url": sub.get('url'),
+                    "ext": ext,
+                    "lang": lang
+                })
+
+    add_options(manual_subs, "✅ Manual")
+    add_options(auto_subs, "🤖 Auto")
+
+    st.subheader("⚙️ Download Options")
+    
+    if options:
+        selection = st.selectbox(
+            "Choose Language & Format",
+            options,
+            format_func=lambda x: x['label']
+        )
+
+        if st.button("🚀 Generate Download Link"):
+            with st.spinner("Fetching raw subtitle file..."):
+                try:
+                    response = requests.get(selection['url'])
+                    if response.status_code == 200:
+                        file_name = f"{safe_title}_{selection['lang']}.{selection['ext']}"
+                        st.success("Ready!")
+                        st.download_button(
+                            label=f"💾 Download {selection['ext'].upper()}",
+                            data=response.content,
+                            file_name=file_name,
+                            mime="application/octet-stream"
+                        )
+                    else:
+                        st.error("Could not fetch file from Dailymotion.")
+                except Exception as e:
+                    st.error(f"Error fetching subtitle: {e}")
+    else:
+        st.info("No text-based subtitles found for this video.")
+
 # --- Main App Layout ---
 
 # Header with Logo
-col_logo, col_title = st.columns([0.1, 0.9])
-with col_logo:
+col1, col2 = st.columns([0.1, 0.9])
+with col1:
     st.image("https://cdn-icons-png.flaticon.com/512/1169/1169608.png", width=70)
-with col_title:
+with col2:
     st.title("Universal Subtitle Downloader")
 
 st.markdown("""
@@ -344,7 +390,7 @@ with st.expander("🔐 Advanced Settings (Cookies)"):
     if use_cookies:
         cookie_file = st.file_uploader("Upload cookies.txt", type=['txt'])
 
-url_input = st.text_input("Paste Video Link:", placeholder="https://www.youtube.com/watch?v=... or https://www.dailymotion.com/video/...")
+url_input = st.text_input("Paste Video Link:", placeholder="https://...")
 
 if url_input:
     cookies_path = None
@@ -357,7 +403,6 @@ if url_input:
         info = get_info(url_input, cookies_path)
 
     if info:
-        # Common Info Display
         title = info.get('title', 'Unknown Title')
         thumbnail = info.get('thumbnail')
         duration = info.get('duration')
@@ -366,7 +411,6 @@ if url_input:
 
         st.divider()
         
-        # Metadata Card
         with st.container():
             col_img, col_txt = st.columns([1, 2])
             with col_img:
@@ -384,10 +428,12 @@ if url_input:
 
         st.divider()
 
-        # Download UI
-        render_download_options(info, url_input, cookies_path)
+        # Branch Logic based on Platform
+        if 'dailymotion' in extractor:
+            render_dailymotion_ui(info)
+        else:
+            render_download_options(info, url_input, cookies_path)
 
-    # Cleanup Cookies
     if cookies_path and os.path.exists(cookies_path):
         try:
             os.remove(cookies_path)
