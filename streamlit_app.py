@@ -127,10 +127,10 @@ def sanitize_filename(name):
     """Sanitize the string to be safe for filenames."""
     return re.sub(r'[\\/*?:"<>|]', "", name)
 
-def strip_vtt_timestamps(vtt_text: str) -> str:
-    """Simple regex to remove VTT/SRT timestamps and metadata for a clean transcript."""
+def strip_timestamps(text: str) -> str:
+    """Removes VTT/SRT timestamps and metadata for a clean transcript."""
     # Remove WEBVTT header
-    text = re.sub(r'WEBVTT\n.*?\n\n', '', vtt_text, flags=re.DOTALL)
+    text = re.sub(r'WEBVTT\n.*?\n\n', '', text, flags=re.DOTALL)
     # Remove timestamps (VTT: 00:00:00.000 --> 00:00:00.000, SRT: 00:00:00,000 --> 00:00:00,000)
     text = re.sub(r'\d{1,2}:\d{2}:\d{2}[\.,]\d{3} --> \d{1,2}:\d{2}:\d{2}[\.,]\d{3}.*?\n', '', text)
     # Remove HTML-like tags
@@ -171,7 +171,8 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
             'cookiefile': cookies_path if cookies_path else None,
         }
 
-        # Force conversion to srt if SRT or Clean TXT is requested (SRT is easier to parse for cleaning)
+        # Conversion logic:
+        # If user wants SRT or Clean TXT, we MUST use FFmpeg to convert the raw vtt to srt first.
         if format_choice in ["SRT", "Clean TXT"]:
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegSubtitlesConvertor',
@@ -187,18 +188,24 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
                 if not files:
                     return None, ""
                 
-                # Logic to find the right file: 
-                # If we asked for SRT, look for .srt first. Otherwise look for .vtt.
+                # Filter for the target file
                 sub_file = None
-                target_ext = '.srt' if format_choice in ["SRT", "Clean TXT"] else '.vtt'
                 
-                # Try to find the specific converted file first
-                for f in files:
-                    if f.endswith(target_ext):
-                        sub_file = f
-                        break
+                if format_choice in ["SRT", "Clean TXT"]:
+                    # Look specifically for the converted .srt file
+                    for f in files:
+                        if f.endswith('.srt'):
+                            sub_file = f
+                            break
+                else:
+                    # 'Raw' selected: Look for the original .vtt (or default format)
+                    # We avoid .srt here to ensure we get the 'Raw' source
+                    for f in files:
+                        if f.endswith('.vtt'):
+                            sub_file = f
+                            break
                 
-                # Fallback to any subtitle file if target extension wasn't found
+                # Global fallback if preferred extension wasn't found
                 if not sub_file:
                     for f in files:
                         if f.endswith(('.srt', '.vtt', '.ttml', '.json3')):
@@ -214,10 +221,11 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
                     content = f.read()
                 
                 if format_choice == "Clean TXT":
-                    content = strip_vtt_timestamps(content)
+                    content = strip_timestamps(content)
                     final_name = f"{sanitize_filename(video_title)}.txt"
                     return content.encode('utf-8'), final_name
                 else:
+                    # Final extension based on the actual file found
                     actual_ext = os.path.splitext(sub_file)[1]
                     final_name = f"{sanitize_filename(video_title)}{actual_ext}"
                     return content.encode('utf-8'), final_name
@@ -256,9 +264,9 @@ def render_download_options(info, url, cookies_path):
     with col_fmt:
         format_choice = st.radio(
             "2. Select Output Format",
-            ["SRT", "VTT", "Clean TXT"],
+            ["SRT", "Raw (VTT)", "Clean TXT"],
             horizontal=True,
-            help="SRT is standard for players. VTT is web-standard. Clean TXT removes all timestamps."
+            help="SRT: Standard format. Raw: Original VTT source. Clean TXT: Transcript only."
         )
         
     if st.button("🚀 Generate Download Link"):
@@ -272,8 +280,8 @@ def render_download_options(info, url, cookies_path):
             )
             
             if data:
-                st.success(f"Success! '{format_choice}' file generated.")
-                mime_map = {"SRT": "text/srt", "VTT": "text/vtt", "Clean TXT": "text/plain"}
+                st.success(f"Success! {format_choice} file generated.")
+                mime_map = {"SRT": "text/srt", "Raw (VTT)": "text/vtt", "Clean TXT": "text/plain"}
                 st.download_button(
                     label=f"💾 Download {name}",
                     data=data,
@@ -281,7 +289,7 @@ def render_download_options(info, url, cookies_path):
                     mime=mime_map.get(format_choice, "text/plain")
                 )
             else:
-                st.error("Failed to extract subtitles in that specific format. Try 'VTT' (Raw) instead.")
+                st.error("Extraction failed. The video might not have subtitles in this specific format.")
 
 # --- Main App Layout ---
 
@@ -294,7 +302,7 @@ with col_title:
 
 st.markdown("""
 <div style='background-color: rgba(30, 41, 59, 0.5); padding: 15px; border-radius: 10px; border: 1px solid #334155; margin-bottom: 20px;'>
-    <p style='margin:0; color: #94a3b8;'>Supports <b>YouTube</b> and <b>Dailymotion</b>. Extract high-quality <b>SRT</b>, <b>VTT</b>, or <b>Clean Transcripts</b> in seconds.</p>
+    <p style='margin:0; color: #94a3b8;'>Supports <b>YouTube</b> and <b>Dailymotion</b>. Extract high-quality <b>SRT</b>, <b>Raw VTT</b>, or <b>Clean Transcripts</b> in seconds.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -345,7 +353,7 @@ if url_input:
 
         st.divider()
 
-        # Download UI (Same logic for both now, as yt-dlp handles both)
+        # Download UI
         render_download_options(info, url_input, cookies_path)
 
     # Cleanup Cookies
