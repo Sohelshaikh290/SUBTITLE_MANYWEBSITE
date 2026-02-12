@@ -127,6 +127,44 @@ def sanitize_filename(name):
     """Sanitize the string to be safe for filenames."""
     return re.sub(r'[\\/*?:"<>|]', "", name)
 
+def vtt_to_srt(vtt_text: str) -> str:
+    """Natively converts WebVTT text to SubRip (SRT) format without FFmpeg."""
+    # 1. Remove WEBVTT header and metadata
+    text = re.sub(r'^WEBVTT.*?(\n\n|\r\n\r\n)', '', vtt_text, flags=re.DOTALL)
+    
+    # 2. Convert timestamps: 00:00.000 -> 00:00:00,000
+    # Handle both MM:SS.mmm and HH:MM:SS.mmm
+    def fix_timestamp(match):
+        ts = match.group(0).replace('.', ',')
+        if len(ts.split(':')[0]) == 2 and ts.count(':') == 1:
+            return "00:" + ts
+        return ts
+
+    text = re.sub(r'\d{1,2}:\d{2}[\.,]\d{3}', fix_timestamp, text)
+    
+    # 3. Process blocks into SRT segments
+    lines = text.splitlines()
+    srt_blocks = []
+    block_id = 1
+    current_block = []
+    
+    for line in lines:
+        if ' --> ' in line:
+            # New segment start
+            if current_block:
+                srt_blocks.append(f"{block_id}\n" + "\n".join(current_block).strip() + "\n")
+                block_id += 1
+                current_block = []
+            current_block.append(line)
+        elif line.strip():
+            current_block.append(line)
+            
+    # Add last block
+    if current_block:
+        srt_blocks.append(f"{block_id}\n" + "\n".join(current_block).strip() + "\n")
+        
+    return "\n".join(srt_blocks).strip()
+
 def strip_timestamps(text: str) -> str:
     """Removes VTT/SRT timestamps and metadata for a clean transcript."""
     # Remove WEBVTT header
@@ -160,9 +198,9 @@ def get_info(url: str, cookies_path: Optional[str] = None):
 # --- Unified Processing Logic ---
 
 def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str, format_choice: str) -> Tuple[Optional[bytes], str]:
-    """Handles download and conversion for both YouTube and general sources via yt-dlp."""
+    """Handles download and native conversion for both YouTube and general sources."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # We use a placeholder extension so yt-dlp can determine the best format during download
+        # We download the raw format (usually vtt) and convert it in Python
         outtmpl = os.path.join(tmpdir, 'subtitle.%(ext)s')
         
         ydl_opts = {
@@ -176,78 +214,52 @@ def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str,
             'no_warnings': True,
         }
 
-        # CONVERSION LOGIC
-        # If user wants SRT or Clean TXT, we instruct yt-dlp to use FFmpeg to convert the downloaded format to srt.
-        if format_choice in ["SRT", "Clean TXT"]:
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegSubtitlesConvertor',
-                'format': 'srt',
-                'when': 'before_dl' # Try to force conversion logic immediately after sub download
-            }]
-
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 video_title = info.get('title', 'subtitles')
                 
-                # Check temp directory for the result
                 files = os.listdir(tmpdir)
                 if not files:
                     return None, ""
                 
-                target_file = None
+                # Find the downloaded subtitle file (vtt, ttml, etc)
+                source_file = None
+                subtitle_exts = ('.vtt', '.srt', '.ttml', '.json3', '.ass', '.ssa')
+                for f in files:
+                    if f.endswith(subtitle_exts):
+                        source_file = f
+                        break
                 
-                # Step 1: Look for the specifically converted .srt file first if that was requested
-                if format_choice in ["SRT", "Clean TXT"]:
-                    for f in files:
-                        if f.endswith('.srt'):
-                            target_file = f
-                            break
-                
-                # Step 2: If we want Raw (VTT) or Step 1 failed, look for .vtt
-                if not target_file and format_choice == "Raw (VTT)":
-                    for f in files:
-                        if f.endswith('.vtt'):
-                            target_file = f
-                            break
-                
-                # Step 3: Global fallback (pick the first subtitle-related file)
-                if not target_file:
-                    subtitle_exts = ('.srt', '.vtt', '.ttml', '.json3', '.ass', '.ssa')
-                    for f in files:
-                        if f.endswith(subtitle_exts):
-                            target_file = f
-                            break
-                
-                if not target_file:
+                if not source_file:
                     return None, ""
 
-                source_path = os.path.join(tmpdir, target_file)
+                source_path = os.path.join(tmpdir, source_file)
                 
-                # Read the actual content of the file
                 with open(source_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
+                    raw_content = f.read()
                 
-                # Determine final output
-                if format_choice == "Clean TXT":
-                    # Strip timestamps regardless of whether it's VTT or SRT
-                    content = strip_timestamps(content)
-                    final_name = f"{sanitize_filename(video_title)}.txt"
-                    return content.encode('utf-8'), final_name
-                
-                elif format_choice == "SRT":
-                    # If target_file is not .srt (meaning conversion failed), we warn the user
-                    if not target_file.endswith('.srt'):
-                        st.warning("FFmpeg conversion failed. Providing original format with .srt extension as fallback.")
+                # Handle Output Selection
+                if format_choice == "SRT":
+                    # Native VTT to SRT conversion (replaces FFmpeg dependency)
+                    if source_file.endswith('.vtt'):
+                        content = vtt_to_srt(raw_content)
+                    else:
+                        content = raw_content # Already srt or other
                     
                     final_name = f"{sanitize_filename(video_title)}.srt"
+                    return content.encode('utf-8'), final_name
+
+                elif format_choice == "Clean TXT":
+                    content = strip_timestamps(raw_content)
+                    final_name = f"{sanitize_filename(video_title)}.txt"
                     return content.encode('utf-8'), final_name
                 
                 else:
                     # Raw (VTT)
-                    actual_ext = os.path.splitext(target_file)[1]
+                    actual_ext = os.path.splitext(source_file)[1]
                     final_name = f"{sanitize_filename(video_title)}{actual_ext}"
-                    return content.encode('utf-8'), final_name
+                    return raw_content.encode('utf-8'), final_name
                     
         except Exception as e:
             st.error(f"Processing failed: {e}")
@@ -285,11 +297,11 @@ def render_download_options(info, url, cookies_path):
             "2. Select Output Format",
             ["SRT", "Raw (VTT)", "Clean TXT"],
             horizontal=True,
-            help="SRT: Full standard format. Raw: Original source (usually VTT). Clean TXT: Pure text."
+            help="SRT: High compatibility. Raw: Original source. Clean TXT: Text only."
         )
         
     if st.button("🚀 Generate Download Link"):
-        with st.spinner("Processing subtitles and converting format..."):
+        with st.spinner("Converting subtitles..."):
             data, name = process_subtitles(
                 url, 
                 selection['code'], 
@@ -299,8 +311,8 @@ def render_download_options(info, url, cookies_path):
             )
             
             if data:
-                st.success(f"Success! {format_choice} generated.")
-                mime_map = {"SRT": "text/srt", "Raw (VTT)": "text/vtt", "Clean TXT": "text/plain"}
+                st.success(f"Success! {format_choice} file ready.")
+                mime_map = {"SRT": "text/plain", "Raw (VTT)": "text/vtt", "Clean TXT": "text/plain"}
                 st.download_button(
                     label=f"💾 Download {name}",
                     data=data,
