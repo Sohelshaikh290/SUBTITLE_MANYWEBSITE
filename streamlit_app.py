@@ -4,7 +4,6 @@ import os
 import tempfile
 import re
 import requests
-import time
 from datetime import timedelta
 from typing import Tuple, Optional
 
@@ -92,7 +91,7 @@ st.markdown("""
         background-color: #1e293b;
         border-color: #334155;
         border-radius: 10px;
-        color: white;
+        color: white !important;
     }
 
     /* Images */
@@ -114,6 +113,11 @@ st.markdown("""
         color: #64748b;
         font-size: 0.875rem;
     }
+
+    /* Radio button labels */
+    .stRadio label {
+        color: #e2e8f0 !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -123,13 +127,55 @@ def sanitize_filename(name):
     """Sanitize the string to be safe for filenames."""
     return re.sub(r'[\\/*?:"<>|]', "", name)
 
-def strip_vtt_timestamps(vtt_text: str) -> str:
-    """Simple regex to remove VTT/SRT timestamps and metadata for a clean transcript."""
-    text = re.sub(r'WEBVTT/n.*?\n\n', '', vtt_text, flags=re.DOTALL)
-    text = re.sub(r'\d{1,2}:\d{2}:\d{2}\.\d{3} --> \d{1,2}:\d{2}:\d{2}\.\d{3}.*?\n', '', text)
-    text = re.sub(r'\d{1,2}:\d{2}:\d{2},\d{3} --> \d{1,2}:\d{2}:\d{2},\d{3}.*?\n', '', text)
+def vtt_to_srt(vtt_text: str) -> str:
+    """Natively converts WebVTT text to SubRip (SRT) format without FFmpeg."""
+    # 1. Remove WEBVTT header and metadata
+    text = re.sub(r'^WEBVTT.*?(\n\n|\r\n\r\n)', '', vtt_text, flags=re.DOTALL)
+    
+    # 2. Convert timestamps: 00:00.000 -> 00:00:00,000
+    # Handle both MM:SS.mmm and HH:MM:SS.mmm
+    def fix_timestamp(match):
+        ts = match.group(0).replace('.', ',')
+        if len(ts.split(':')[0]) == 2 and ts.count(':') == 1:
+            return "00:" + ts
+        return ts
+
+    text = re.sub(r'\d{1,2}:\d{2}[\.,]\d{3}', fix_timestamp, text)
+    
+    # 3. Process blocks into SRT segments
+    lines = text.splitlines()
+    srt_blocks = []
+    block_id = 1
+    current_block = []
+    
+    for line in lines:
+        if ' --> ' in line:
+            # New segment start
+            if current_block:
+                srt_blocks.append(f"{block_id}\n" + "\n".join(current_block).strip() + "\n")
+                block_id += 1
+                current_block = []
+            current_block.append(line)
+        elif line.strip():
+            current_block.append(line)
+            
+    # Add last block
+    if current_block:
+        srt_blocks.append(f"{block_id}\n" + "\n".join(current_block).strip() + "\n")
+        
+    return "\n".join(srt_blocks).strip()
+
+def strip_timestamps(text: str) -> str:
+    """Removes VTT/SRT timestamps and metadata for a clean transcript."""
+    # Remove WEBVTT header
+    text = re.sub(r'WEBVTT\n.*?\n\n', '', text, flags=re.DOTALL)
+    # Remove timestamps (VTT: 00:00:00.000 --> 00:00:00.000, SRT: 00:00:00,000 --> 00:00:00,000)
+    text = re.sub(r'\d{1,2}:\d{2}:\d{2}[\.,]\d{3} --> \d{1,2}:\d{2}:\d{2}[\.,]\d{3}.*?\n', '', text)
+    # Remove HTML-like tags
     text = re.sub(r'<[^>]*>', '', text)
+    # Remove leading sequence numbers from SRT
     text = re.sub(r'^\d+\s*$', '', text, flags=re.MULTILINE)
+    # Collapse multiple newlines
     text = re.sub(r'\n+', '\n', text)
     return text.strip()
 
@@ -149,18 +195,23 @@ def get_info(url: str, cookies_path: Optional[str] = None):
         st.error(f"Extraction Error: {str(e)}")
         return None
 
-# --- YouTube Specific Logic ---
+# --- Unified Processing Logic ---
 
-def process_youtube_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str, clean_text: bool) -> Tuple[Optional[bytes], str]:
+def process_subtitles(url: str, sub_code: str, is_auto: bool, cookies_path: str, format_choice: str) -> Tuple[Optional[bytes], str]:
+    """Handles download and native conversion for both YouTube and general sources."""
     with tempfile.TemporaryDirectory() as tmpdir:
+        # We download the raw format (usually vtt) and convert it in Python
+        outtmpl = os.path.join(tmpdir, 'subtitle.%(ext)s')
+        
         ydl_opts = {
             'skip_download': True,
             'writesubtitles': not is_auto,
             'writeautomaticsub': is_auto,
             'subtitleslangs': [sub_code],
-            'outtmpl': os.path.join(tmpdir, 'downloaded_sub'),
+            'outtmpl': outtmpl,
             'cookiefile': cookies_path if cookies_path else None,
-            'postprocessors': [{'key': 'FFmpegSubtitlesConvertor', 'format': 'srt'}] if not clean_text else [],
+            'quiet': True,
+            'no_warnings': True,
         }
 
         try:
@@ -172,31 +223,52 @@ def process_youtube_subtitles(url: str, sub_code: str, is_auto: bool, cookies_pa
                 if not files:
                     return None, ""
                 
-                # Find the largest file (likely the sub)
-                source_file = os.path.join(tmpdir, files[0])
-                ext = os.path.splitext(files[0])[1]
+                # Find the downloaded subtitle file (vtt, ttml, etc)
+                source_file = None
+                subtitle_exts = ('.vtt', '.srt', '.ttml', '.json3', '.ass', '.ssa')
+                for f in files:
+                    if f.endswith(subtitle_exts):
+                        source_file = f
+                        break
                 
-                with open(source_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
+                if not source_file:
+                    return None, ""
+
+                source_path = os.path.join(tmpdir, source_file)
                 
-                if clean_text:
-                    content = strip_vtt_timestamps(content)
+                with open(source_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    raw_content = f.read()
+                
+                # Handle Output Selection
+                if format_choice == "SRT":
+                    # Native VTT to SRT conversion (replaces FFmpeg dependency)
+                    if source_file.endswith('.vtt'):
+                        content = vtt_to_srt(raw_content)
+                    else:
+                        content = raw_content # Already srt or other
+                    
+                    final_name = f"{sanitize_filename(video_title)}.srt"
+                    return content.encode('utf-8'), final_name
+
+                elif format_choice == "Clean TXT":
+                    content = strip_timestamps(raw_content)
                     final_name = f"{sanitize_filename(video_title)}.txt"
                     return content.encode('utf-8'), final_name
+                
                 else:
-                    final_name = f"{sanitize_filename(video_title)}{ext}"
-                    return content.encode('utf-8'), final_name
+                    # Raw (VTT)
+                    actual_ext = os.path.splitext(source_file)[1]
+                    final_name = f"{sanitize_filename(video_title)}{actual_ext}"
+                    return raw_content.encode('utf-8'), final_name
                     
         except Exception as e:
             st.error(f"Processing failed: {e}")
             return None, ""
 
-def render_youtube_ui(info, url, cookies_path):
+# --- UI Renderers ---
+
+def render_download_options(info, url, cookies_path):
     st.subheader("⚙️ Download Options")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        clean_mode = st.toggle("Clean Transcript Mode", value=True, help="Removes timestamps for easy reading.")
     
     manual = info.get('subtitles', {})
     auto = info.get('automatic_captions', {})
@@ -209,116 +281,72 @@ def render_youtube_ui(info, url, cookies_path):
     
     if not options:
         st.warning("No subtitles detected for this video.")
-    else:
+        return
+
+    col_lang, col_fmt = st.columns(2)
+    
+    with col_lang:
         selection = st.selectbox(
-            "Choose Language & Type", 
+            "1. Choose Language", 
             options, 
             format_func=lambda x: x['label']
         )
-        
-        if st.button("🚀 Generate Download Link"):
-            with st.spinner("Processing..."):
-                data, name = process_youtube_subtitles(
-                    url, 
-                    selection['code'], 
-                    selection['auto'], 
-                    cookies_path, 
-                    clean_mode
-                )
-                
-                if data:
-                    st.success("Ready!")
-                    st.download_button(
-                        label=f"💾 Download {name}",
-                        data=data,
-                        file_name=name,
-                        mime="text/plain" if clean_mode else "text/srt"
-                    )
-
-# --- Dailymotion Specific Logic ---
-
-def render_dailymotion_ui(info):
-    video_title = info.get('title', 'Dailymotion_Video')
-    safe_title = sanitize_filename(video_title)
     
-    manual_subs = info.get('subtitles', {})
-    auto_subs = info.get('automatic_captions', {})
-    
-    options = []
-
-    # Helper to add options
-    def add_options(subs_dict, type_label):
-        for lang, sub_list in subs_dict.items():
-            for sub in sub_list:
-                ext = sub.get('ext')
-                # Skip playlists, we want text formats
-                if ext == 'm3u8': 
-                    continue
-                
-                options.append({
-                    "label": f"{type_label} {lang.upper()} ({ext})",
-                    "url": sub.get('url'),
-                    "ext": ext,
-                    "lang": lang
-                })
-
-    add_options(manual_subs, "✅ Manual")
-    add_options(auto_subs, "🤖 Auto")
-
-    st.subheader("⚙️ Download Options")
-    
-    if options:
-        selection = st.selectbox(
-            "Choose Language & Format",
-            options,
-            format_func=lambda x: x['label']
+    with col_fmt:
+        format_choice = st.radio(
+            "2. Select Output Format",
+            ["SRT", "Raw (VTT)", "Clean TXT"],
+            horizontal=True,
+            help="SRT: High compatibility. Raw: Original source. Clean TXT: Text only."
         )
-
-        if st.button("🚀 Generate Download Link"):
-            with st.spinner("Fetching raw subtitle file..."):
-                try:
-                    response = requests.get(selection['url'])
-                    if response.status_code == 200:
-                        file_name = f"{safe_title}_{selection['lang']}.{selection['ext']}"
-                        st.success("Ready!")
-                        st.download_button(
-                            label=f"💾 Download {selection['ext'].upper()}",
-                            data=response.content,
-                            file_name=file_name,
-                            mime="application/octet-stream"
-                        )
-                    else:
-                        st.error("Could not fetch file from Dailymotion.")
-                except Exception as e:
-                    st.error(f"Error fetching subtitle: {e}")
-    else:
-        st.info("No text-based subtitles found for this video.")
+        
+    if st.button("🚀 Generate Download Link"):
+        with st.spinner("Converting subtitles..."):
+            data, name = process_subtitles(
+                url, 
+                selection['code'], 
+                selection['auto'], 
+                cookies_path, 
+                format_choice
+            )
+            
+            if data:
+                st.success(f"Success! {format_choice} file ready.")
+                mime_map = {"SRT": "text/plain", "Raw (VTT)": "text/vtt", "Clean TXT": "text/plain"}
+                st.download_button(
+                    label=f"💾 Download {name}",
+                    data=data,
+                    file_name=name,
+                    mime=mime_map.get(format_choice, "text/plain")
+                )
+            else:
+                st.error("Extraction failed. This video might not support the selected format.")
 
 # --- Main App Layout ---
 
 # Header with Logo
-col1, col2 = st.columns([0.1, 0.9])
-with col1:
+col_logo, col_title = st.columns([0.1, 0.9])
+with col_logo:
     st.image("https://cdn-icons-png.flaticon.com/512/1169/1169608.png", width=70)
-with col2:
+with col_title:
     st.title("Universal Subtitle Downloader")
 
 st.markdown("""
 <div style='background-color: rgba(30, 41, 59, 0.5); padding: 15px; border-radius: 10px; border: 1px solid #334155; margin-bottom: 20px;'>
-    <p style='margin:0; color: #94a3b8;'>Supports <b>YouTube</b> (Clean & SRT conversion) and <b>Dailymotion</b> (Raw VTT/SRT extraction).</p>
+    <p style='margin:0; color: #94a3b8;'>Supports <b>YouTube</b> and <b>Dailymotion</b>. Extract high-quality <b>SRT</b>, <b>Raw VTT</b>, or <b>Clean Transcripts</b> in seconds.</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Global Settings (Cookies apply to both if needed, mainly YouTube)
+# Global Settings
 with st.expander("🔐 Advanced Settings (Cookies)"):
-    use_cookies = st.toggle("Enable Cookies", help="Required for age-gated YouTube videos")
+    use_cookies = st.toggle("Enable Cookies", help="Recommended for age-gated or region-locked content.")
     cookie_file = None
     if use_cookies:
         cookie_file = st.file_uploader("Upload cookies.txt", type=['txt'])
 
-url = st.text_input("Paste Video Link (YouTube or Dailymotion):", placeholder="https://...")
+url_input = st.text_input("Paste Video Link:", placeholder="https://www.youtube.com/watch?v=... or https://www.dailymotion.com/video/...")
 
-if url:
+if url_input:
     cookies_path = None
     if use_cookies and cookie_file:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
@@ -326,7 +354,7 @@ if url:
             cookies_path = tmp.name
 
     with st.spinner("Analyzing video metadata..."):
-        info = get_info(url, cookies_path)
+        info = get_info(url_input, cookies_path)
 
     if info:
         # Common Info Display
@@ -334,38 +362,37 @@ if url:
         thumbnail = info.get('thumbnail')
         duration = info.get('duration')
         duration_str = str(timedelta(seconds=duration)) if duration else "Unknown"
-        extractor = info.get('extractor_key', 'Unknown').lower()
+        extractor = info.get('extractor_key', 'Video').lower()
 
         st.divider()
         
-        # Use a container for the video info card effect
+        # Metadata Card
         with st.container():
-            col1, col2 = st.columns([1, 2])
-            with col1:
+            col_img, col_txt = st.columns([1, 2])
+            with col_img:
                 if thumbnail:
                     st.image(thumbnail, use_container_width=True)
-            with col2:
+            with col_txt:
                 st.subheader(title)
                 st.markdown(f"""
                 <div style='display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px;'>
                     <span style='background-color: #3b82f6; padding: 4px 12px; border-radius: 20px; font-size: 0.8em; font-weight: 600;'>{extractor.capitalize()}</span>
                     <span style='background-color: #1e293b; border: 1px solid #334155; padding: 4px 12px; border-radius: 20px; font-size: 0.8em;'>⏱️ {duration_str}</span>
-                    <span style='background-color: #1e293b; border: 1px solid #334155; padding: 4px 12px; border-radius: 20px; font-size: 0.8em;'>👤 {info.get('uploader', 'Unknown')}</span>
+                    <span style='background-color: #1e293b; border: 1px solid #334155; padding: 4px 12px; border-radius: 20px; font-size: 0.8em;'>👤 {info.get('uploader', 'Unknown Author')}</span>
                 </div>
                 """, unsafe_allow_html=True)
 
         st.divider()
 
-        # Branch Logic based on Platform
-        if 'dailymotion' in extractor:
-            render_dailymotion_ui(info)
-        else:
-            # Default to YouTube style logic for YouTube and others
-            render_youtube_ui(info, url, cookies_path)
+        # Download UI
+        render_download_options(info, url_input, cookies_path)
 
-    # Cleanup
+    # Cleanup Cookies
     if cookies_path and os.path.exists(cookies_path):
-        os.remove(cookies_path)
+        try:
+            os.remove(cookies_path)
+        except:
+            pass
 
 st.markdown("---")
 st.markdown("<p class='footer-text'>Developed with ❤️ using Streamlit & yt-dlp</p>", unsafe_allow_html=True)
